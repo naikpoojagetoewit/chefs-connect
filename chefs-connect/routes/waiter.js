@@ -156,4 +156,81 @@ router.post('/bills/:id/pay', async (req, res) => {
   res.redirect(`/waiter/orders/${order.id}/bill`);
 });
 
+router.get('/scan', async (req, res) => {
+  res.send(layout('Scan to Verify Delivery', `
+    <h1>Scan Order QR</h1>
+    <p class="muted">Point the camera at the customer's order QR to verify and confirm delivery.</p>
+    <div class="card">
+      <div id="reader" style="width:100%;max-width:400px;margin:0 auto;"></div>
+      <p id="scan-status" class="muted" style="text-align:center;"></p>
+    </div>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script>
+      const statusEl = document.getElementById('scan-status');
+      const scanner = new Html5QrcodeScanner('reader', { fps: 10, qrbox: 220 }, false);
+      let handled = false;
+      scanner.render(function onScanSuccess(decodedText) {
+        if (handled) return;
+        handled = true;
+        statusEl.textContent = 'QR found — looking up order...';
+        scanner.clear().then(function () {
+          window.location.href = '/waiter/verify/' + encodeURIComponent(decodedText);
+        });
+      }, function onScanFailure() { /* ignore — fires continuously while scanning */ });
+    </script>
+    <a class="btn secondary" href="/waiter/dashboard">Back to Dashboard</a>
+  `, req.session.user));
+});
+
+router.get('/verify/:token', async (req, res) => {
+  const orderResult = await pool.query(
+    `SELECT o.*, u.username AS customer_name, t.table_number FROM orders o
+     JOIN users u ON o.customer_id = u.id LEFT JOIN tables t ON o.table_id = t.id
+     WHERE o.qr_token = $1`, [req.params.token]
+  );
+  const order = orderResult.rows[0];
+  if (!order) {
+    return res.send(layout('QR Not Recognized', `
+      <div class="card"><p class="msg error">This QR code doesn't match any order.</p></div>
+      <a class="btn secondary" href="/waiter/scan">Scan Again</a>
+    `, req.session.user));
+  }
+
+  const itemsResult = await pool.query('SELECT * FROM order_items WHERE order_id = $1', [order.id]);
+  const itemRows = itemsResult.rows.map(i => `<tr><td>${i.item_name}</td><td>${i.quantity}</td></tr>`).join('');
+
+  res.send(layout('Verify Order #' + order.id, `
+    <h1>Order #${order.id} ${badge(order.status)}</h1>
+    <div class="card">
+      <p><strong>Customer:</strong> ${order.customer_name}</p>
+      <p><strong>Where:</strong> ${order.order_type === 'dine_in' ? 'Table ' + order.table_number : 'Takeaway'}</p>
+      <table><tr><th>Item</th><th>Qty</th></tr>${itemRows}</table>
+    </div>
+    ${order.delivered_at ? `
+    <div class="card"><p class="msg success">✅ Already delivered on ${new Date(order.delivered_at).toLocaleString('en-IN')}.</p></div>
+    ` : order.status === 'ready' ? `
+    <div class="card">
+      <form method="POST" action="/waiter/verify/${req.params.token}/confirm">
+        <button type="submit" class="success">Confirm & Mark Served</button>
+      </form>
+    </div>` : `
+    <div class="card"><p class="msg error">This order isn't marked "ready" yet (currently: ${order.status}) — check with the kitchen before delivering.</p></div>
+    `}
+    <a class="btn secondary" href="/waiter/scan">Scan Another</a>
+    <a class="btn secondary" href="/waiter/dashboard">Back to Dashboard</a>
+  `, req.session.user));
+});
+
+router.post('/verify/:token/confirm', async (req, res) => {
+  const orderResult = await pool.query('SELECT * FROM orders WHERE qr_token = $1', [req.params.token]);
+  const order = orderResult.rows[0];
+  if (!order) return res.redirect('/waiter/scan');
+
+  await pool.query(
+    `UPDATE orders SET status = 'served', delivered_at = NOW(), waiter_id = COALESCE(waiter_id, $2) WHERE id = $1 AND status = 'ready'`,
+    [order.id, req.session.user.id]
+  );
+  res.redirect('/waiter/verify/' + req.params.token);
+});
+
 module.exports = router;

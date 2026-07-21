@@ -1,118 +1,86 @@
--- ============================================
--- ChefsConnect - Database Schema
--- ============================================
--- STEP 1: Create the database first (only once):
---     CREATE DATABASE chefs_connect;
--- STEP 2: Connect to it, then run everything below (pgAdmin Query Tool, or psql \i)
+function layout(title, body, user) {
+  const nav = () => {
+    if (!user) return `<a href="/login">Login</a><a href="/signup">Sign up</a>`;
+    if (user.role === 'customer') {
+      return `<a href="/customer/menu">Menu</a><a href="/customer/cart">Cart</a><a href="/customer/orders">My Orders</a><a href="/logout">Logout</a>`;
+    }
+    if (user.role === 'waiter') {
+      return `<a href="/waiter/dashboard">Dashboard</a><a href="/waiter/scan">Scan QR</a><a href="/logout">Logout</a>`;
+    }
+    if (user.role === 'chef') {
+      return `<a href="/chef/kitchen">Kitchen</a><a href="/chef/menu">Menu Manager</a><a href="/logout">Logout</a>`;
+    }
+    return `<a href="/logout">Logout</a>`;
+  };
 
--- Users: customers, waiters, chefs all share one table with a role
-CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    username VARCHAR(50) UNIQUE NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    role VARCHAR(20) NOT NULL CHECK (role IN ('customer','waiter','chef')),
-    created_at TIMESTAMP DEFAULT NOW()
-);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>${title} · ChefsConnect</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #f6f5f2; margin: 0; color: #2b2b2b; }
+  nav { background: #7c2d12; color: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+  nav .brand { font-weight: 700; font-size: 18px; letter-spacing: 0.5px; }
+  nav a { color: #fff; text-decoration: none; margin-left: 16px; font-size: 14px; }
+  nav a:hover { text-decoration: underline; }
+  .container { max-width: 1000px; margin: 30px auto; padding: 0 20px; }
+  .card { background: #fff; border-radius: 10px; padding: 22px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 20px; }
+  h1, h2, h3 { margin-top: 0; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { text-align: left; padding: 9px; border-bottom: 1px solid #eee; font-size: 13.5px; vertical-align: middle; }
+  th { background: #faf5ee; }
+  input, select, textarea { width: 100%; padding: 8px; margin: 5px 0 12px; border: 1px solid #ccc; border-radius: 5px; font-size: 14px; font-family: inherit; }
+  label { font-size: 13px; font-weight: 600; color: #444; }
+  button, .btn { background: #c2410c; color: #fff; border: none; padding: 8px 14px; border-radius: 5px; cursor: pointer; font-size: 13.5px; text-decoration: none; display: inline-block; }
+  button.secondary, .btn.secondary { background: #6b7280; }
+  button.success, .btn.success { background: #16a34a; }
+  button.danger, .btn.danger { background: #dc2626; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .msg { padding: 10px 14px; border-radius: 5px; margin-bottom: 16px; font-size: 14px; }
+  .msg.error { background: #fee2e2; color: #991b1b; }
+  .msg.success { background: #dcfce7; color: #166534; }
+  .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; }
+  .badge.pending { background: #fef3c7; color: #92400e; }
+  .badge.preparing { background: #dbeafe; color: #1e40af; }
+  .badge.ready { background: #d1fae5; color: #065f46; }
+  .badge.served { background: #e0e7ff; color: #3730a3; }
+  .badge.billed { background: #fce7f3; color: #9d174d; }
+  .badge.paid { background: #dcfce7; color: #166534; }
+  .badge.cancelled { background: #fee2e2; color: #991b1b; }
+  .badge.free { background: #dcfce7; color: #166534; }
+  .badge.occupied { background: #fee2e2; color: #991b1b; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .tile { background: #fff; border-radius: 8px; padding: 16px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .stats { display: flex; gap: 16px; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 140px; background: #fff7ed; padding: 16px; border-radius: 8px; text-align: center; }
+  .stat .num { font-size: 24px; font-weight: 700; color: #7c2d12; }
+  form.inline { display: inline; }
+  .muted { color: #777; font-size: 13px; }
+</style>
+</head>
+<body>
+<nav>
+  <div class="brand">🍽️ ChefsConnect ${user ? `<span style="font-weight:400;font-size:13px;opacity:0.85;">(${user.role})</span>` : ''}</div>
+  <div>${nav()}</div>
+</nav>
+<div class="container">${body}</div>
+</body>
+</html>`;
+}
 
--- Restaurant tables (for dine-in)
-CREATE TABLE IF NOT EXISTS tables (
-    id SERIAL PRIMARY KEY,
-    table_number INTEGER UNIQUE NOT NULL,
-    capacity INTEGER DEFAULT 4,
-    status VARCHAR(20) NOT NULL DEFAULT 'free' CHECK (status IN ('free','occupied'))
-);
+function msg(text, type) {
+  return text ? `<div class="msg ${type}">${text}</div>` : '';
+}
 
--- Menu categories (Starters, Main Course, Beverages, etc.)
-CREATE TABLE IF NOT EXISTS menu_categories (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL
-);
+function badge(status) {
+  return `<span class="badge ${status}">${status.replace('_', ' ')}</span>`;
+}
 
--- Menu items
-CREATE TABLE IF NOT EXISTS menu_items (
-    id SERIAL PRIMARY KEY,
-    category_id INTEGER REFERENCES menu_categories(id) ON DELETE SET NULL,
-    name VARCHAR(100) NOT NULL,
-    description VARCHAR(255),
-    price NUMERIC(10,2) NOT NULL,
-    is_available BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT NOW()
-);
+function money(n) {
+  return '₹' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 
--- Orders
-CREATE TABLE IF NOT EXISTS orders (
-    id SERIAL PRIMARY KEY,
-    customer_id INTEGER NOT NULL REFERENCES users(id),
-    waiter_id INTEGER REFERENCES users(id),
-    table_id INTEGER REFERENCES tables(id),
-    order_type VARCHAR(20) NOT NULL CHECK (order_type IN ('dine_in','takeaway')),
-    status VARCHAR(20) NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending','preparing','ready','served','billed','paid','cancelled')),
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Order line items
-CREATE TABLE IF NOT EXISTS order_items (
-    id SERIAL PRIMARY KEY,
-    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-    menu_item_id INTEGER NOT NULL REFERENCES menu_items(id),
-    item_name VARCHAR(100) NOT NULL,   -- snapshot, in case menu item is edited later
-    quantity INTEGER NOT NULL CHECK (quantity > 0),
-    price_at_order NUMERIC(10,2) NOT NULL,
-    item_status VARCHAR(20) NOT NULL DEFAULT 'pending'
-        CHECK (item_status IN ('pending','preparing','ready')),
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Bills
-CREATE TABLE IF NOT EXISTS bills (
-    id SERIAL PRIMARY KEY,
-    order_id INTEGER UNIQUE NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-    subtotal NUMERIC(10,2) NOT NULL,
-    tax NUMERIC(10,2) NOT NULL,
-    discount NUMERIC(10,2) NOT NULL DEFAULT 0,
-    total NUMERIC(10,2) NOT NULL,
-    payment_method VARCHAR(20) CHECK (payment_method IN ('cash','card','upi')),
-    paid_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Feedback (customer rates a completed, paid order)
-CREATE TABLE IF NOT EXISTS feedback (
-    id SERIAL PRIMARY KEY,
-    order_id INTEGER UNIQUE NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-    customer_id INTEGER NOT NULL REFERENCES users(id),
-    rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
-    comment VARCHAR(500),
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
-CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
-CREATE INDEX IF NOT EXISTS idx_order_items_status ON order_items(item_status);
-
--- ============================================
--- Seed data so the app isn't empty on first run
--- ============================================
-
-INSERT INTO tables (table_number, capacity) VALUES
-(1,2),(2,2),(3,4),(4,4),(5,6),(6,4),(7,2),(8,4)
-ON CONFLICT (table_number) DO NOTHING;
-
-INSERT INTO menu_categories (name) VALUES
-('Starters'), ('Main Course'), ('Breads'), ('Desserts'), ('Beverages')
-ON CONFLICT (name) DO NOTHING;
-
-INSERT INTO menu_items (category_id, name, description, price) VALUES
-((SELECT id FROM menu_categories WHERE name='Starters'), 'Paneer Tikka', 'Grilled cottage cheese with spices', 220.00),
-((SELECT id FROM menu_categories WHERE name='Starters'), 'Veg Spring Rolls', 'Crispy rolls with vegetable filling', 180.00),
-((SELECT id FROM menu_categories WHERE name='Main Course'), 'Butter Chicken', 'Creamy tomato-based chicken curry', 320.00),
-((SELECT id FROM menu_categories WHERE name='Main Course'), 'Paneer Butter Masala', 'Cottage cheese in rich tomato gravy', 280.00),
-((SELECT id FROM menu_categories WHERE name='Main Course'), 'Veg Biryani', 'Fragrant rice with mixed vegetables', 250.00),
-((SELECT id FROM menu_categories WHERE name='Breads'), 'Butter Naan', 'Soft leavened bread with butter', 60.00),
-((SELECT id FROM menu_categories WHERE name='Breads'), 'Garlic Roti', 'Whole wheat bread with garlic', 45.00),
-((SELECT id FROM menu_categories WHERE name='Desserts'), 'Gulab Jamun', 'Milk dumplings in sugar syrup', 90.00),
-((SELECT id FROM menu_categories WHERE name='Beverages'), 'Masala Chai', 'Spiced Indian tea', 40.00),
-((SELECT id FROM menu_categories WHERE name='Beverages'), 'Fresh Lime Soda', 'Refreshing lime drink', 70.00)
-ON CONFLICT DO NOTHING;
+module.exports = { layout, msg, badge, money };

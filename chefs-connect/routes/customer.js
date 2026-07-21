@@ -1,8 +1,27 @@
 const express = require('express');
+const crypto = require('crypto');
+const QRCode = require('qrcode');
+const Razorpay = require('razorpay');
 const pool = require('../db');
 const { layout, msg, badge, money } = require('../utils/layout');
 
 const router = express.Router();
+
+// Razorpay client is created lazily (only when a payment route is actually
+// hit) so the app doesn't crash on startup if keys aren't set yet.
+let razorpayClient = null;
+function getRazorpay() {
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+    throw new Error('Razorpay keys are not configured (set RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET).');
+  }
+  if (!razorpayClient) {
+    razorpayClient = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  }
+  return razorpayClient;
+}
 
 // Cart lives in session: [{ menu_item_id, name, price, qty }]
 function getCart(req) {
@@ -203,6 +222,8 @@ router.get('/orders/:id', async (req, res) => {
   const feedbackResult = await pool.query('SELECT * FROM feedback WHERE order_id = $1', [order.id]);
   const hasFeedback = feedbackResult.rows.length > 0;
 
+  const qrDataUrl = await QRCode.toDataURL(order.qr_token, { width: 220, margin: 1 });
+
   const itemRows = itemsResult.rows.map(i => `
     <tr><td>${i.item_name}</td><td>${i.quantity}</td><td>${money(i.price_at_order)}</td><td>${badge(i.item_status)}</td></tr>
   `).join('');
@@ -217,6 +238,13 @@ router.get('/orders/:id', async (req, res) => {
         ${itemRows}
       </table>
     </div>
+    ${!['paid', 'cancelled'].includes(order.status) ? `
+    <div class="card" style="text-align:center;">
+      <h2>Your Delivery QR</h2>
+      <p class="muted">Show this to your waiter when your order arrives — they'll scan it to verify and confirm delivery.</p>
+      <img src="${qrDataUrl}" alt="Order verification QR" style="border-radius:8px;" />
+      <p class="muted">Order #${order.id} · keep this open until served</p>
+    </div>` : ''}
     ${bill ? `
     <div class="card">
       <h2>Bill</h2>
@@ -226,7 +254,54 @@ router.get('/orders/:id', async (req, res) => {
         <tr><td>Discount</td><td>-${money(bill.discount)}</td></tr>
         <tr><td><strong>Total</strong></td><td><strong>${money(bill.total)}</strong></td></tr>
       </table>
-      <p class="muted">${bill.paid_at ? 'Paid via ' + bill.payment_method + ' on ' + new Date(bill.paid_at).toLocaleString('en-IN') : 'Payment pending'}</p>
+      ${bill.paid_at ? `
+      <p class="muted">✅ Paid via ${bill.payment_method} on ${new Date(bill.paid_at).toLocaleString('en-IN')}</p>` : `
+      <p class="muted">Payment pending — pay in person with your waiter, or pay online now:</p>
+      <button id="rzp-pay-btn" class="success">Pay Online (Razorpay)</button>
+      <p id="rzp-status" class="muted"></p>
+      <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+      <script>
+        document.getElementById('rzp-pay-btn').addEventListener('click', async function () {
+          const statusEl = document.getElementById('rzp-status');
+          statusEl.textContent = 'Starting payment...';
+          try {
+            const createRes = await fetch('/customer/orders/${order.id}/pay/create', { method: 'POST' });
+            const createData = await createRes.json();
+            if (!createRes.ok) { statusEl.textContent = createData.error || 'Could not start payment.'; return; }
+
+            const rzp = new Razorpay({
+              key: createData.key,
+              amount: createData.amount,
+              currency: 'INR',
+              name: 'ChefsConnect',
+              description: 'Order #${order.id}',
+              order_id: createData.orderId,
+              handler: async function (response) {
+                statusEl.textContent = 'Verifying payment...';
+                const verifyRes = await fetch('/customer/orders/${order.id}/pay/verify', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(response),
+                });
+                const verifyData = await verifyRes.json();
+                if (verifyRes.ok && verifyData.success) {
+                  window.location.reload();
+                } else {
+                  statusEl.textContent = verifyData.error || 'Payment verification failed.';
+                }
+              },
+              modal: { ondismiss: function () { statusEl.textContent = 'Payment cancelled.'; } },
+              theme: { color: '#c2410c' },
+            });
+            rzp.on('payment.failed', function (resp) {
+              statusEl.textContent = 'Payment failed: ' + resp.error.description;
+            });
+            rzp.open();
+          } catch (err) {
+            statusEl.textContent = 'Something went wrong starting payment.';
+          }
+        });
+      </script>`}
     </div>` : ''}
     ${order.status === 'paid' && !hasFeedback ? `
     <div class="card">
@@ -255,6 +330,72 @@ router.post('/orders/:id/feedback', async (req, res) => {
     [order.id, req.session.user.id, rating, comment]
   );
   res.redirect('/customer/orders/' + order.id);
+});
+
+router.post('/orders/:id/pay/create', async (req, res) => {
+  const orderResult = await pool.query(
+    'SELECT * FROM orders WHERE id = $1 AND customer_id = $2', [req.params.id, req.session.user.id]
+  );
+  const order = orderResult.rows[0];
+  if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+  const billResult = await pool.query('SELECT * FROM bills WHERE order_id = $1', [order.id]);
+  const bill = billResult.rows[0];
+  if (!bill) return res.status(400).json({ error: 'No bill generated yet — ask your waiter to generate the bill first.' });
+  if (bill.paid_at) return res.status(400).json({ error: 'This bill is already paid.' });
+
+  try {
+    const razorpay = getRazorpay();
+    const rzpOrder = await razorpay.orders.create({
+      amount: Math.round(Number(bill.total) * 100), // paise
+      currency: 'INR',
+      receipt: `chefsconnect_order_${order.id}`,
+    });
+    await pool.query('UPDATE bills SET gateway_order_id = $1 WHERE id = $2', [rzpOrder.id, bill.id]);
+    res.json({ orderId: rzpOrder.id, amount: rzpOrder.amount, key: process.env.RAZORPAY_KEY_ID });
+  } catch (err) {
+    console.error('Razorpay order creation failed:', err.message);
+    res.status(500).json({ error: 'Online payment isn\'t set up yet. Please pay via your waiter instead.' });
+  }
+});
+
+router.post('/orders/:id/pay/verify', async (req, res) => {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return res.status(400).json({ error: 'Missing payment details.' });
+  }
+
+  const expectedSignature = crypto
+    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+    .digest('hex');
+
+  if (expectedSignature !== razorpay_signature) {
+    return res.status(400).json({ error: 'Payment signature verification failed.' });
+  }
+
+  const orderResult = await pool.query(
+    'SELECT * FROM orders WHERE id = $1 AND customer_id = $2', [req.params.id, req.session.user.id]
+  );
+  const order = orderResult.rows[0];
+  if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+  const billResult = await pool.query(
+    'SELECT * FROM bills WHERE order_id = $1 AND gateway_order_id = $2', [order.id, razorpay_order_id]
+  );
+  const bill = billResult.rows[0];
+  if (!bill) return res.status(404).json({ error: 'Bill not found for this payment.' });
+
+  await pool.query(
+    `UPDATE bills SET payment_method = 'online', gateway_payment_id = $1, paid_at = NOW() WHERE id = $2`,
+    [razorpay_payment_id, bill.id]
+  );
+  await pool.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [order.id]);
+  if (order.table_id) {
+    await pool.query(`UPDATE tables SET status = 'free' WHERE id = $1`, [order.table_id]);
+  }
+
+  res.json({ success: true });
 });
 
 module.exports = router;
